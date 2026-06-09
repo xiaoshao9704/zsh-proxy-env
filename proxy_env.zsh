@@ -63,6 +63,11 @@ _proxy_sync_from_system() {
 : "${PROXY_DEFAULT_HTTPS_PORT:=${PROXY_DEFAULT_HTTP_PORT}}"
 : "${PROXY_DEFAULT_SOCKS_HOST:=${PROXY_DEFAULT_HOST}}"
 : "${PROXY_DEFAULT_SOCKS_PORT:=${PROXY_DEFAULT_PORT}}"
+# SOCKS URL scheme used for all_proxy fallback. socks5h delegates DNS to the proxy.
+: "${PROXY_SOCKS_SCHEME:=socks5h}"
+if [[ "${PROXY_SOCKS_SCHEME}" != "socks5" && "${PROXY_SOCKS_SCHEME}" != "socks5h" ]]; then
+  PROXY_SOCKS_SCHEME="socks5h"
+fi
 
 # 心跳开关和参数，可在 source 前通过环境变量覆盖
 : "${PROXY_HEARTBEAT_ENABLED:=1}"
@@ -74,6 +79,8 @@ _proxy_sync_from_system() {
 : "${PROXY_PRECMD_ENABLED:=${PROXY_HEARTBEAT_ENABLED}}"
 # 追加到 no_proxy 的额外条目（逗号分隔），在系统配置之外叠加
 : "${PROXY_NO_PROXY_EXTRA:=}"
+# 保留插件加载前或外部设置的 no_proxy/NO_PROXY，避免覆盖用户自定义绕过名单
+: "${PROXY_NO_PROXY_PRESERVE:=1}"
 
 # 兜底值（系统代理未配置时使用）
 _PROXY_HTTP_HOST="${PROXY_DEFAULT_HTTP_HOST}"
@@ -83,6 +90,19 @@ _PROXY_HTTPS_PORT="${PROXY_DEFAULT_HTTPS_PORT}"
 _PROXY_SOCKS_HOST="${PROXY_DEFAULT_SOCKS_HOST}"
 _PROXY_SOCKS_PORT="${PROXY_DEFAULT_SOCKS_PORT}"
 _PROXY_NOPROXY=""
+
+_PROXY_MANAGED_HTTP_PROXY=""
+_PROXY_MANAGED_HTTPS_PROXY=""
+_PROXY_MANAGED_ALL_PROXY=""
+_PROXY_MANAGED_NO_PROXY=""
+_PROXY_ORIGINAL_HTTP_PROXY="${http_proxy:-}"
+_PROXY_ORIGINAL_UPPER_HTTP_PROXY="${HTTP_PROXY:-}"
+_PROXY_ORIGINAL_HTTPS_PROXY="${https_proxy:-}"
+_PROXY_ORIGINAL_UPPER_HTTPS_PROXY="${HTTPS_PROXY:-}"
+_PROXY_ORIGINAL_ALL_PROXY="${all_proxy:-}"
+_PROXY_ORIGINAL_UPPER_ALL_PROXY="${ALL_PROXY:-}"
+_PROXY_ORIGINAL_NO_PROXY="${no_proxy:-${NO_PROXY:-}}"
+_PROXY_ORIGINAL_UPPER_NO_PROXY="${NO_PROXY:-}"
 
 # 初始化时同步一次
 _proxy_sync_from_system
@@ -108,7 +128,7 @@ _proxy_url() {
 
   if [[ "${kind}" == "socks5" ]]; then
     [[ -n "${_PROXY_SOCKS_HOST}" && -n "${_PROXY_SOCKS_PORT}" ]] || return 1
-    echo "socks5://${_PROXY_SOCKS_HOST}:${_PROXY_SOCKS_PORT}"
+    echo "${PROXY_SOCKS_SCHEME}://${_PROXY_SOCKS_HOST}:${_PROXY_SOCKS_PORT}"
     return 0
   fi
 
@@ -159,11 +179,37 @@ _proxy_probe() {
   fi
 }
 
-# 内部：清理所有代理环境变量
+# 内部：仅清理本插件上一次写入的代理环境变量，避免误删用户手动设置
 _proxy_clear() {
-  unset http_proxy https_proxy all_proxy
-  unset HTTP_PROXY HTTPS_PROXY ALL_PROXY
-  unset no_proxy NO_PROXY
+  if [[ -n "${_PROXY_MANAGED_HTTP_PROXY}" && "${http_proxy}" == "${_PROXY_MANAGED_HTTP_PROXY}" ]]; then
+    [[ -n "${_PROXY_ORIGINAL_HTTP_PROXY}" ]] && export http_proxy="${_PROXY_ORIGINAL_HTTP_PROXY}" || unset http_proxy
+  fi
+  if [[ -n "${_PROXY_MANAGED_HTTP_PROXY}" && "${HTTP_PROXY}" == "${_PROXY_MANAGED_HTTP_PROXY}" ]]; then
+    [[ -n "${_PROXY_ORIGINAL_UPPER_HTTP_PROXY}" ]] && export HTTP_PROXY="${_PROXY_ORIGINAL_UPPER_HTTP_PROXY}" || unset HTTP_PROXY
+  fi
+  if [[ -n "${_PROXY_MANAGED_HTTPS_PROXY}" && "${https_proxy}" == "${_PROXY_MANAGED_HTTPS_PROXY}" ]]; then
+    [[ -n "${_PROXY_ORIGINAL_HTTPS_PROXY}" ]] && export https_proxy="${_PROXY_ORIGINAL_HTTPS_PROXY}" || unset https_proxy
+  fi
+  if [[ -n "${_PROXY_MANAGED_HTTPS_PROXY}" && "${HTTPS_PROXY}" == "${_PROXY_MANAGED_HTTPS_PROXY}" ]]; then
+    [[ -n "${_PROXY_ORIGINAL_UPPER_HTTPS_PROXY}" ]] && export HTTPS_PROXY="${_PROXY_ORIGINAL_UPPER_HTTPS_PROXY}" || unset HTTPS_PROXY
+  fi
+  if [[ -n "${_PROXY_MANAGED_ALL_PROXY}" && "${all_proxy}" == "${_PROXY_MANAGED_ALL_PROXY}" ]]; then
+    [[ -n "${_PROXY_ORIGINAL_ALL_PROXY}" ]] && export all_proxy="${_PROXY_ORIGINAL_ALL_PROXY}" || unset all_proxy
+  fi
+  if [[ -n "${_PROXY_MANAGED_ALL_PROXY}" && "${ALL_PROXY}" == "${_PROXY_MANAGED_ALL_PROXY}" ]]; then
+    [[ -n "${_PROXY_ORIGINAL_UPPER_ALL_PROXY}" ]] && export ALL_PROXY="${_PROXY_ORIGINAL_UPPER_ALL_PROXY}" || unset ALL_PROXY
+  fi
+  if [[ -n "${_PROXY_MANAGED_NO_PROXY}" && "${no_proxy}" == "${_PROXY_MANAGED_NO_PROXY}" ]]; then
+    [[ -n "${_PROXY_ORIGINAL_NO_PROXY}" ]] && export no_proxy="${_PROXY_ORIGINAL_NO_PROXY}" || unset no_proxy
+  fi
+  if [[ -n "${_PROXY_MANAGED_NO_PROXY}" && "${NO_PROXY}" == "${_PROXY_MANAGED_NO_PROXY}" ]]; then
+    [[ -n "${_PROXY_ORIGINAL_UPPER_NO_PROXY}" ]] && export NO_PROXY="${_PROXY_ORIGINAL_UPPER_NO_PROXY}" || unset NO_PROXY
+  fi
+
+  _PROXY_MANAGED_HTTP_PROXY=""
+  _PROXY_MANAGED_HTTPS_PROXY=""
+  _PROXY_MANAGED_ALL_PROXY=""
+  _PROXY_MANAGED_NO_PROXY=""
 }
 
 # 内部：设置所有代理环境变量
@@ -173,44 +219,66 @@ _proxy_apply() {
   https_proxy_url="$(_proxy_url https 2>/dev/null)"
   socks_proxy_url="$(_proxy_url socks5 2>/dev/null)"
 
+  _proxy_clear
+
   if [[ -n "${http_proxy_url}" ]]; then
     export http_proxy="${http_proxy_url}"
     export HTTP_PROXY="${http_proxy_url}"
+    _PROXY_MANAGED_HTTP_PROXY="${http_proxy_url}"
   elif [[ -n "${socks_proxy_url}" ]]; then
     export http_proxy="${socks_proxy_url}"
     export HTTP_PROXY="${socks_proxy_url}"
+    _PROXY_MANAGED_HTTP_PROXY="${socks_proxy_url}"
   fi
 
   if [[ -n "${https_proxy_url}" ]]; then
     export https_proxy="${https_proxy_url}"
     export HTTPS_PROXY="${https_proxy_url}"
+    _PROXY_MANAGED_HTTPS_PROXY="${https_proxy_url}"
   elif [[ -n "${http_proxy_url}" ]]; then
     export https_proxy="${http_proxy_url}"
     export HTTPS_PROXY="${http_proxy_url}"
+    _PROXY_MANAGED_HTTPS_PROXY="${http_proxy_url}"
   elif [[ -n "${socks_proxy_url}" ]]; then
     export https_proxy="${socks_proxy_url}"
     export HTTPS_PROXY="${socks_proxy_url}"
+    _PROXY_MANAGED_HTTPS_PROXY="${socks_proxy_url}"
   fi
 
   if [[ -n "${socks_proxy_url}" ]]; then
     export all_proxy="${socks_proxy_url}"
     export ALL_PROXY="${socks_proxy_url}"
+    _PROXY_MANAGED_ALL_PROXY="${socks_proxy_url}"
   elif [[ -n "${http_proxy_url}" ]]; then
     export all_proxy="${http_proxy_url}"
     export ALL_PROXY="${http_proxy_url}"
+    _PROXY_MANAGED_ALL_PROXY="${http_proxy_url}"
   fi
 
-  # 构建 no_proxy：系统 ExceptionsList + 固定本地地址 + 用户扩展
+  # 构建 no_proxy：已有用户值 + 系统 ExceptionsList + 固定本地地址 + 用户扩展
   local _noproxy="127.0.0.1,localhost"
+  local _preserved_noproxy="${_PROXY_ORIGINAL_NO_PROXY}"
   [[ -n "${_PROXY_NOPROXY}" ]] && _noproxy="${_PROXY_NOPROXY},${_noproxy}"
+  if [[ "${PROXY_NO_PROXY_PRESERVE}" == "1" && -n "${no_proxy}" && "${no_proxy}" != "${_PROXY_MANAGED_NO_PROXY}" ]]; then
+    _preserved_noproxy="${no_proxy}"
+  elif [[ "${PROXY_NO_PROXY_PRESERVE}" == "1" && -n "${NO_PROXY}" && "${NO_PROXY}" != "${_PROXY_MANAGED_NO_PROXY}" ]]; then
+    _preserved_noproxy="${NO_PROXY}"
+  fi
+  [[ "${PROXY_NO_PROXY_PRESERVE}" == "1" && -n "${_preserved_noproxy}" ]] && _noproxy="${_preserved_noproxy},${_noproxy}"
   [[ -n "${PROXY_NO_PROXY_EXTRA}" ]] && _noproxy="${_noproxy},${PROXY_NO_PROXY_EXTRA}"
   export no_proxy="${_noproxy}"
   export NO_PROXY="${_noproxy}"
+  _PROXY_MANAGED_NO_PROXY="${_noproxy}"
 }
 
 # 内部：是否存在任意代理环境变量
 _proxy_env_is_set() {
   [[ -n "${http_proxy}${https_proxy}${all_proxy}${HTTP_PROXY}${HTTPS_PROXY}${ALL_PROXY}" ]]
+}
+
+# 内部：是否存在本插件管理的代理环境变量
+_proxy_managed_env_is_set() {
+  [[ -n "${_PROXY_MANAGED_HTTP_PROXY}${_PROXY_MANAGED_HTTPS_PROXY}${_PROXY_MANAGED_ALL_PROXY}" ]]
 }
 
 proxy_env_refresh() {
@@ -262,7 +330,7 @@ _proxy_describe() {
   fi
 
   if [[ -n "${_PROXY_SOCKS_HOST}" && -n "${_PROXY_SOCKS_PORT}" ]]; then
-    parts+=("socks5://${_PROXY_SOCKS_HOST}:${_PROXY_SOCKS_PORT}")
+    parts+=("${PROXY_SOCKS_SCHEME}://${_PROXY_SOCKS_HOST}:${_PROXY_SOCKS_PORT}")
   fi
 
   if (( ${#parts[@]} == 0 )); then
@@ -286,11 +354,9 @@ _proxy_heartbeat() {
   _proxy_sync_from_system
 
   if _proxy_probe; then
-    if ! _proxy_env_is_set; then
-      _proxy_apply
-    fi
+    _proxy_apply
   else
-    if _proxy_env_is_set; then
+    if _proxy_managed_env_is_set; then
       _proxy_clear
       echo "[proxy] heartbeat failed, proxy env cleared" >&2
     fi

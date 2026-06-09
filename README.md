@@ -7,10 +7,11 @@ It reads proxy settings from the macOS system configuration, probes reachability
 ## Features
 
 - **Auto-sync from system** — reads HTTP, HTTPS, and SOCKS5 proxy settings via `scutil --proxy`
-- **Auto-sync `no_proxy`** — reads system `ExceptionsList` and merges it with local defaults
+- **Auto-sync `no_proxy`** — reads system `ExceptionsList` and merges it with existing/local defaults
 - **Heartbeat probe** — verifies proxy reachability before each prompt (throttled, configurable interval)
 - **Graceful fallback** — TCP port probe when HTTP probe is unavailable
 - **Hot-reload** — detects proxy address changes between heartbeats
+- **Managed cleanup** — restores pre-existing proxy variables instead of deleting user values
 - **Zero dependencies** — only requires `zsh`, `scutil`, and optionally `curl` / `nc`
 
 ## Installation
@@ -56,6 +57,7 @@ export PROXY_DEFAULT_HTTPS_HOST=127.0.0.1
 export PROXY_DEFAULT_HTTPS_PORT=7890
 export PROXY_DEFAULT_SOCKS_HOST=127.0.0.1
 export PROXY_DEFAULT_SOCKS_PORT=7891
+export PROXY_SOCKS_SCHEME=socks5h  # socks5h = proxy-side DNS, socks5 = local DNS
 
 # Heartbeat: check proxy reachability on each prompt
 export PROXY_HEARTBEAT_ENABLED=1      # 1 = on, 0 = off
@@ -72,6 +74,9 @@ export PROXY_CHECK_ON_SOURCE=1
 
 # Extra no_proxy entries appended after system ExceptionsList (comma-separated)
 export PROXY_NO_PROXY_EXTRA="corp.internal,10.0.0.0/8"
+
+# Preserve existing no_proxy/NO_PROXY entries when applying plugin-managed values
+export PROXY_NO_PROXY_PRESERVE=1
 
 source /path/to/proxy_env.zsh
 ```
@@ -90,7 +95,7 @@ source /path/to/proxy_env.zsh
 | Command | Description |
 |---|---|
 | `proxy-on` | Sync system proxy and enable if reachable |
-| `proxy-off` | Clear all proxy environment variables |
+| `proxy-off` | Restore pre-existing proxy variables or clear plugin-managed values |
 | `proxy-status` | Show current state, target addresses, and heartbeat config |
 | `proxy-refresh` | Same as `proxy-on`, with output |
 | `proxy-refresh-silent` | Same as `proxy-on`, no output |
@@ -101,7 +106,7 @@ source /path/to/proxy_env.zsh
 ```
 $ proxy-status
 proxy env: enabled
-proxy target: http://127.0.0.1:7890, https->http://127.0.0.1:7890, socks5://127.0.0.1:7891
+proxy target: http://127.0.0.1:7890, https->http://127.0.0.1:7890, socks5h://127.0.0.1:7891
 no_proxy: *.local,169.254/16,127.0.0.1,localhost
 heartbeat: on (interval=30s, precmd=1)
 heartbeat url: https://www.gstatic.com/generate_204
@@ -117,14 +122,17 @@ Each prompt (precmd, throttled)
   └── _proxy_probe
   │     ├── curl via proxy  (HTTP heartbeat)
   │     └── nc / /dev/tcp   (TCP fallback)
-  ├── reachable  →  _proxy_apply  (export env vars)
-  └── unreachable →  _proxy_clear (unset env vars)
+  ├── reachable  →  _proxy_apply  (export/update managed env vars)
+  └── unreachable →  _proxy_clear (restore or unset managed env vars)
 ```
 
-`no_proxy` is built in three layers:
-1. System `ExceptionsList` (from `scutil --proxy`)
-2. Fixed local addresses: `127.0.0.1,localhost`
-3. `PROXY_NO_PROXY_EXTRA` (user-defined)
+By default, SOCKS proxy URLs use `socks5h://` so DNS resolution happens through the proxy. Set `PROXY_SOCKS_SCHEME=socks5` before sourcing the plugin if you prefer local DNS resolution.
+
+`no_proxy` is built in four layers:
+1. Existing `no_proxy` / `NO_PROXY` when `PROXY_NO_PROXY_PRESERVE=1`
+2. System `ExceptionsList` (from `scutil --proxy`)
+3. Fixed local addresses: `127.0.0.1,localhost`
+4. `PROXY_NO_PROXY_EXTRA` (user-defined)
 
 ## License
 
